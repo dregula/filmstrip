@@ -3,12 +3,25 @@
 # robust for other types of video.
 
 import cv2
-#import cv
+# import cv
 import argparse
 import json
 import os
 import numpy as np
 import errno
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """ Special json encoder for numpy types """
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+
 
 def getInfo(sourcePath):
     cap = cv2.VideoCapture(sourcePath)
@@ -24,12 +37,14 @@ def getInfo(sourcePath):
 
 
 def scale(img, xScale, yScale):
-    res = cv2.resize(img, None,fx=xScale, fy=yScale, interpolation = cv2.INTER_AREA)
+    res = cv2.resize(img, None, fx=xScale, fy=yScale, interpolation=cv2.INTER_AREA)
     return res
 
+
 def resize(img, width, height):
-    res = cv2.resize(img, (width, height), interpolation = cv2.INTER_AREA)
+    res = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
     return res
+
 
 #
 # Extract [numCols] domninant colors from an image
@@ -38,7 +53,7 @@ def resize(img, width, height):
 #
 def extract_cols(image, numCols):
     # convert to np.float32 matrix that can be clustered
-    Z = image.reshape((-1,3))
+    Z = image.reshape((-1, 3))
     Z = np.float32(Z)
 
     # Set parameters for the clustering
@@ -49,15 +64,20 @@ def extract_cols(image, numCols):
 
     # cluster
     lab = []
-    compactness, labels, centers = cv2.kmeans(data=Z, K=K, bestLabels=None, criteria=criteria, attempts=10, flags=cv2.KMEANS_RANDOM_CENTERS)
+    compactness, labels, centers = cv2.kmeans(data=Z, K=K, bestLabels=None, criteria=criteria, attempts=10,
+                                              flags=cv2.KMEANS_RANDOM_CENTERS)
 
     clusterCounts = []
     for idx in range(K):
-        count = len(Z[labels == idx])
+        mask = labels[:] == idx
+        count = np.sum(mask)
+        # print(f"Number of pixels at K:{idx} = {count}")
+        # the original code raises a numpy error about dimensionality
+        # count = len(Z[labels == idx])
         clusterCounts.append(count)
 
-    #Reverse the cols stored in centers because cols are stored in BGR
-    #in opencv.
+    # Reverse the cols stored in centers because cols are stored in BGR
+    # in opencv.
     rgbCenters = []
     for center in centers:
         bgr = center.tolist()
@@ -86,9 +106,9 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
     }
 
     lastFrame = None
-    while(cap.isOpened()):
+    while (cap.isOpened()):
         ret, frame = cap.read()
-        if frame == None:
+        if frame is None:
             break
 
         frame_number = cap.get(cv2.CAP_PROP_POS_FRAMES) - 1
@@ -97,14 +117,13 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
         # calculate image differences more robust to noise
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = scale(gray, 0.25, 0.25)
-        gray = cv2.GaussianBlur(gray, (9,9), 0.0)
+        gray = cv2.GaussianBlur(gray, (9, 9), 0.0)
 
         if frame_number < after_frame:
             lastFrame = gray
             continue
 
-
-        if lastFrame != None:
+        if lastFrame is not None:
 
             diff = cv2.subtract(gray, lastFrame)
 
@@ -127,7 +146,7 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
     cap.release()
     cv2.destroyAllWindows()
 
-    #compute some states
+    # compute some states
     diff_counts = [fi["diff_count"] for fi in data["frame_info"]]
     data["stats"] = {
         "num": len(diff_counts),
@@ -139,9 +158,12 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
     }
     greater_than_mean = [fi for fi in data["frame_info"] if fi["diff_count"] > data["stats"]["mean"]]
     greater_than_median = [fi for fi in data["frame_info"] if fi["diff_count"] > data["stats"]["median"]]
-    greater_than_one_sd = [fi for fi in data["frame_info"] if fi["diff_count"] > data["stats"]["sd"] + data["stats"]["mean"]]
-    greater_than_two_sd = [fi for fi in data["frame_info"] if fi["diff_count"] > (data["stats"]["sd"] * 2) + data["stats"]["mean"]]
-    greater_than_three_sd = [fi for fi in data["frame_info"] if fi["diff_count"] > (data["stats"]["sd"] * 3) + data["stats"]["mean"]]
+    greater_than_one_sd = [fi for fi in data["frame_info"] if
+                           fi["diff_count"] > data["stats"]["sd"] + data["stats"]["mean"]]
+    greater_than_two_sd = [fi for fi in data["frame_info"] if
+                           fi["diff_count"] > (data["stats"]["sd"] * 2) + data["stats"]["mean"]]
+    greater_than_three_sd = [fi for fi in data["frame_info"] if
+                             fi["diff_count"] > (data["stats"]["sd"] * 3) + data["stats"]["mean"]]
 
     data["stats"]["greater_than_mean"] = len(greater_than_mean)
     data["stats"]["greater_than_median"] = len(greater_than_median)
@@ -152,40 +174,40 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
     return data
 
 
-
 #
 # Take an image and write it out at various sizes.
 #
 # TODO: Create output directories if they do not exist.
 #
 seq_num_global = 0
+
+
 def writeImagePyramid(destPath, name, seqNumber, image):
     global seq_num_global
     fullPath = os.path.join(destPath, "full", name + "-" + str(seqNumber).zfill(4) + ".png")
     fullSeqPath = os.path.join(destPath, "fullseq", name + "-" + str(seq_num_global).zfill(4) + ".png")
     seq_num_global += 1
-    #halfPath = os.path.join(destPath, "half", name + "-" + str(seqNumber).zfill(4) + ".png")
-    #quarterPath = os.path.join(destPath, "quarter", name + "-" + str(seqNumber).zfill(4) + ".png")
-    #eigthPath = os.path.join(destPath, "eigth", name + "-" + str(seqNumber).zfill(4) + ".png")
-    #sixteenthPath = os.path.join(destPath, "sixteenth", name + "-" + str(seqNumber).zfill(4) + ".png")
+    # halfPath = os.path.join(destPath, "half", name + "-" + str(seqNumber).zfill(4) + ".png")
+    # quarterPath = os.path.join(destPath, "quarter", name + "-" + str(seqNumber).zfill(4) + ".png")
+    # eighthPath = os.path.join(destPath, "eighth", name + "-" + str(seqNumber).zfill(4) + ".png")
+    # sixteenthPath = os.path.join(destPath, "sixteenth", name + "-" + str(seqNumber).zfill(4) + ".png")
 
-    #hImage = scale(image, 0.5, 0.5)
-    #qImage = scale(image, 0.25, 0.25)
-    #eImage = scale(image, 0.125, 0.125)
-    #sImage = scale(image, 0.0625, 0.0625)
+    # hImage = scale(image, 0.5, 0.5)
+    # qImage = scale(image, 0.25, 0.25)
+    # eImage = scale(image, 0.125, 0.125)
+    # sImage = scale(image, 0.0625, 0.0625)
 
     cv2.imwrite(fullPath, image)
     cv2.imwrite(fullSeqPath, image)
-    #cv2.imwrite(halfPath, hImage)
-    #cv2.imwrite(quarterPath, qImage)
-    #cv2.imwrite(eigthPath, eImage)
-    #cv2.imwrite(sixteenthPath, sImage)
-
+    # cv2.imwrite(halfPath, hImage)
+    # cv2.imwrite(quarterPath, qImage)
+    # cv2.imwrite(eighthPath, eImage)
+    # cv2.imwrite(sixteenthPath, sImage)
 
 
 #
 # Selects a set of frames as key frames (frames that represent a significant difference in
-# the video i.e. potential scene chnges). Key frames are selected as those frames where the
+# the video i.e. potential scene changes). Key frames are selected as those frames where the
 # number of pixels that changed from the previous frame are more than 1.85 standard deviations
 # times from the mean number of changed pixels across all interframe changes.
 #
@@ -208,8 +230,7 @@ def detectScenes(sourcePath, destPath, data, name, verbose=False):
         cols = extract_cols(small, 5)
         data["frame_info"][index]["dominant_cols"] = cols
 
-
-        if frame != None:
+        if frame is not None:
             writeImagePyramid(destDir, name, fi["frame_number"], frame)
 
             if verbose:
@@ -224,27 +245,28 @@ def detectScenes(sourcePath, destPath, data, name, verbose=False):
 
 def makeOutputDirs(path):
     try:
-        #todo this doesn't quite work like mkdirp. it will fail
-        #fi any folder along the path exists. fix
+        # todo this doesn't quite work like mkdirp. it will fail
+        # fi any folder along the path exists. fix
         os.makedirs(os.path.join(path, "metadata"))
         os.makedirs(os.path.join(path, "images", "full"))
         os.makedirs(os.path.join(path, "images", "fullseq"))
-        os.makedirs(os.path.join(path, "images", "half"))
-        os.makedirs(os.path.join(path, "images", "quarter"))
-        os.makedirs(os.path.join(path, "images", "eigth"))
-        os.makedirs(os.path.join(path, "images", "sixteenth"))
-    except OSError as exc: # Python >2.5
+        # os.makedirs(os.path.join(path, "images", "half"))
+        # os.makedirs(os.path.join(path, "images", "quarter"))
+        # os.makedirs(os.path.join(path, "images", "eigth"))
+        # os.makedirs(os.path.join(path, "images", "sixteenth"))
+    except OSError as exc:  # Python >2.5
         if exc.errno == errno.EEXIST and os.path.isdir(path):
             pass
-        else: raise
+        else:
+            raise
 
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('-s','--source', help='source file', required=True)
+parser.add_argument('-s', '--source', help='source file', required=True)
 parser.add_argument('-d', '--dest', help='dest folder', required=True)
 parser.add_argument('-n', '--name', help='image sequence name', required=True)
-parser.add_argument('-a','--after_frame', help='after frame', default=0)
+parser.add_argument('-a', '--after_frame', help='after frame', default=0)
 parser.add_argument('-v', '--verbose', action='store_true')
 parser.set_defaults(verbose=False)
 
@@ -264,10 +286,10 @@ keyframeInfo = [frame_info for frame_info in data["frame_info"] if "dominant_col
 # Write out the results
 data_fp = os.path.join(args.dest, "metadata", args.name + "-meta.json")
 with open(data_fp, 'w') as f:
-    data_json_str = json.dumps(data, indent=4)
+    data_json_str = json.dumps(data, indent=4, cls=NumpyEncoder)
     f.write(data_json_str)
 
 keyframe_info_fp = os.path.join(args.dest, "metadata", args.name + "-keyframe-meta.json")
 with open(keyframe_info_fp, 'w') as f:
-    data_json_str = json.dumps(keyframeInfo, indent=4)
+    data_json_str = json.dumps(keyframeInfo, indent=4, cls=NumpyEncoder)
     f.write(data_json_str)
