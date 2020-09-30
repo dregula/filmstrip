@@ -9,6 +9,9 @@ import json
 import os
 import numpy as np
 import errno
+from blur_detection import BlurDetection
+from estimate_brightness import EstimateBrightness
+from estimate_darkness import EstimateDarkness
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -105,6 +108,12 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
         "frame_info": []
     }
 
+    # TODO: faster, better ways of removing frames...
+
+    blur_detector = BlurDetection(threshold=14, blur_detection_method="variance_of_laplacian")
+    brightness_estimator = EstimateBrightness(white_threshold=230, empty_pixels_allowed=0)
+    darkness_estimator = EstimateDarkness(black_threshold=100, dark_pixels_allowed=0)
+
     lastFrame = None
     while (cap.isOpened()):
         ret, frame = cap.read()
@@ -113,25 +122,45 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
 
         frame_number = cap.get(cv2.CAP_PROP_POS_FRAMES) - 1
 
-        # Convert to grayscale, scale down and blur to make
-        # calculate image differences more robust to noise
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Convert to grayscale
+        gray = BlurDetection.to_gray(frame)
+
+        # estimate blurriness
+        blurriness = blur_detector.measure_of_focus(gray)
+
+        # estimate brightness
+        # TODO: not working...
+        brightness = brightness_estimator.measure_of_brightness(gray)
+        darkness = darkness_estimator.measure_of_darkness(gray)
+
+        # Scale down and blur to make image differences more robust to noise
         gray = scale(gray, 0.25, 0.25)
         gray = cv2.GaussianBlur(gray, (9, 9), 0.0)
+
+        #   try- normalize grayscale first...
+        cols, rows = gray.shape
+        num_pixels = cols * rows
 
         if frame_number < after_frame:
             lastFrame = gray
             continue
 
         if lastFrame is not None:
+            # TODO: simple subtraction keeps identical frames, but with less light (i.e. same, but darker)
+            lastFrame_brightness = np.sum(lastFrame) / (255 * num_pixels)
+            gray_brightness = np.sum(gray) / (255 * num_pixels)
+            adjusted_lastFrame = cv2.convertScaleAbs(lastFrame, alpha = gray_brightness / lastFrame_brightness, beta = 0)
 
-            diff = cv2.subtract(gray, lastFrame)
+            diff = cv2.subtract(gray, adjusted_lastFrame)
 
             diffMag = cv2.countNonZero(diff)
 
             frame_info = {
                 "frame_number": int(frame_number),
-                "diff_count": int(diffMag)
+                "diff_count": int(diffMag),
+                "blurriness": float(blurriness),
+                "brightness": float(brightness),
+                "darkness": float(darkness)
             }
             data["frame_info"].append(frame_info)
 
@@ -146,30 +175,11 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
     cap.release()
     cv2.destroyAllWindows()
 
-    # compute some states
-    diff_counts = [fi["diff_count"] for fi in data["frame_info"]]
-    data["stats"] = {
-        "num": len(diff_counts),
-        "min": np.min(diff_counts),
-        "max": np.max(diff_counts),
-        "mean": np.mean(diff_counts),
-        "median": np.median(diff_counts),
-        "sd": np.std(diff_counts)
-    }
-    greater_than_mean = [fi for fi in data["frame_info"] if fi["diff_count"] > data["stats"]["mean"]]
-    greater_than_median = [fi for fi in data["frame_info"] if fi["diff_count"] > data["stats"]["median"]]
-    greater_than_one_sd = [fi for fi in data["frame_info"] if
-                           fi["diff_count"] > data["stats"]["sd"] + data["stats"]["mean"]]
-    greater_than_two_sd = [fi for fi in data["frame_info"] if
-                           fi["diff_count"] > (data["stats"]["sd"] * 2) + data["stats"]["mean"]]
-    greater_than_three_sd = [fi for fi in data["frame_info"] if
-                             fi["diff_count"] > (data["stats"]["sd"] * 3) + data["stats"]["mean"]]
-
-    data["stats"]["greater_than_mean"] = len(greater_than_mean)
-    data["stats"]["greater_than_median"] = len(greater_than_median)
-    data["stats"]["greater_than_one_sd"] = len(greater_than_one_sd)
-    data["stats"]["greater_than_three_sd"] = len(greater_than_three_sd)
-    data["stats"]["greater_than_two_sd"] = len(greater_than_two_sd)
+    # compute some stats
+    update_stats(data, "diff_count")
+    update_stats(data, "blurriness")
+    update_stats(data, "brightness")
+    update_stats(data, "darkness")
 
     return data
 
@@ -180,6 +190,41 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
 # TODO: Create output directories if they do not exist.
 #
 seq_num_global = 0
+
+
+def update_stats(data_to_update, desired_attribute: str):
+    if data_to_update is None or desired_attribute is None \
+            or "frame_info" not in data_to_update:       # data is a dictionary
+        return False
+    # be sure we have a place for new stats
+    if "stats" not in data_to_update:
+        data_to_update["stats"] = {}
+    # reshape data for this attribute
+    desired_attribute_array = [frame_info[desired_attribute] for frame_info in data_to_update["frame_info"]]
+    data_to_update["stats"][desired_attribute] = {
+        "num": len(desired_attribute_array),
+        "min": np.min(desired_attribute_array),
+        "max": np.max(desired_attribute_array),
+        "mean": np.mean(desired_attribute_array),
+        "median": np.median(desired_attribute_array),
+        "sd": np.std(desired_attribute_array)
+    }
+    greater_than_mean = [fi for fi in data_to_update["frame_info"] if fi[desired_attribute] > data_to_update["stats"][desired_attribute]["mean"]]
+    greater_than_median = [fi for fi in data_to_update["frame_info"] if fi[desired_attribute] > data_to_update["stats"][desired_attribute]["median"]]
+    greater_than_one_sd = [fi for fi in data_to_update["frame_info"] if
+                           fi[desired_attribute] > data_to_update["stats"][desired_attribute]["sd"] + data_to_update["stats"][desired_attribute]["mean"]]
+    greater_than_two_sd = [fi for fi in data_to_update["frame_info"] if
+                           fi[desired_attribute] > (data_to_update["stats"][desired_attribute]["sd"] * 2) + data_to_update["stats"][desired_attribute]["mean"]]
+    greater_than_three_sd = [fi for fi in data_to_update["frame_info"] if
+                             fi[desired_attribute] > (data_to_update["stats"][desired_attribute]["sd"] * 3) + data_to_update["stats"][desired_attribute]["mean"]]
+
+    data_to_update["stats"][desired_attribute]["greater_than_mean"] = len(greater_than_mean)
+    data_to_update["stats"][desired_attribute]["greater_than_median"] = len(greater_than_median)
+    data_to_update["stats"][desired_attribute]["greater_than_one_sd"] = len(greater_than_one_sd)
+    data_to_update["stats"][desired_attribute]["greater_than_three_sd"] = len(greater_than_three_sd)
+    data_to_update["stats"][desired_attribute]["greater_than_two_sd"] = len(greater_than_two_sd)
+
+    return data_to_update
 
 
 def writeImagePyramid(destPath, name, seqNumber, image):
@@ -215,10 +260,19 @@ def detectScenes(sourcePath, destPath, data, name, verbose=False):
     destDir = os.path.join(destPath, "images")
 
     # TODO make sd multiplier externally configurable
-    diff_threshold = (data["stats"]["sd"] * 1.85) + data["stats"]["mean"]
+    diff_threshold = (data["stats"]["diff_count"]["sd"] * 1.0) + data["stats"]["diff_count"]["mean"]
+    blur_threshold = (data["stats"]["blurriness"]["sd"] * 2.0) + data["stats"]["blurriness"]["mean"]
+    bright_threshold = (data["stats"]["brightness"]["sd"] * 1.0) + data["stats"]["brightness"]["mean"]
+    dark_threshold = (data["stats"]["darkness"]["sd"] * 1.0) + data["stats"]["darkness"]["mean"]
 
     cap = cv2.VideoCapture(sourcePath)
     for index, fi in enumerate(data["frame_info"]):
+        if fi["brightness"] > bright_threshold:
+            continue
+        if fi["darkness"] > dark_threshold:
+            continue
+        if fi["blurriness"] > blur_threshold:
+            continue
         if fi["diff_count"] < diff_threshold:
             continue
 
