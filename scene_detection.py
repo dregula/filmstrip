@@ -111,8 +111,8 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
     # TODO: faster, better ways of removing frames...
 
     blur_detector = BlurDetection(threshold=14, blur_detection_method="variance_of_laplacian")
-    brightness_estimator = EstimateBrightness(white_threshold=230, empty_pixels_allowed=0)
-    darkness_estimator = EstimateDarkness(black_threshold=100, dark_pixels_allowed=0)
+    brightness_estimator = EstimateBrightness(white_threshold=220, empty_pixels_allowed=0)
+    darkness_estimator = EstimateDarkness(black_threshold=150, dark_pixels_allowed=0)
 
     lastFrame = None
     while (cap.isOpened()):
@@ -129,27 +129,28 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
         blurriness = blur_detector.measure_of_focus(gray)
 
         # estimate brightness
-        # TODO: not working...
         brightness = brightness_estimator.measure_of_brightness(gray)
         darkness = darkness_estimator.measure_of_darkness(gray)
+
+        # estimate average intensity
+        cols, rows = gray.shape
+        num_pixels = cols * rows
+        intensity = np.sum(gray) / (255 * num_pixels)
 
         # Scale down and blur to make image differences more robust to noise
         gray = scale(gray, 0.25, 0.25)
         gray = cv2.GaussianBlur(gray, (9, 9), 0.0)
-
-        #   try- normalize grayscale first...
-        cols, rows = gray.shape
-        num_pixels = cols * rows
 
         if frame_number < after_frame:
             lastFrame = gray
             continue
 
         if lastFrame is not None:
-            # TODO: simple subtraction keeps identical frames, but with less light (i.e. same, but darker)
-            lastFrame_brightness = np.sum(lastFrame) / (255 * num_pixels)
-            gray_brightness = np.sum(gray) / (255 * num_pixels)
-            adjusted_lastFrame = cv2.convertScaleAbs(lastFrame, alpha = gray_brightness / lastFrame_brightness, beta = 0)
+            # simple subtraction keeps identical frames, but with less light (i.e. same, but darker)
+            # TODO: this belongs refactored into the metadata, then acted upon in DetectScenes...
+            lastFrame_intensity = np.sum(lastFrame) / (255 * num_pixels)
+            gray_intensity = np.sum(gray) / (255 * num_pixels)
+            adjusted_lastFrame = cv2.convertScaleAbs(lastFrame, alpha=(gray_intensity / lastFrame_intensity), beta=0)
 
             diff = cv2.subtract(gray, adjusted_lastFrame)
 
@@ -160,7 +161,8 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
                 "diff_count": int(diffMag),
                 "blurriness": float(blurriness),
                 "brightness": float(brightness),
-                "darkness": float(darkness)
+                "darkness": float(darkness),
+                "intensity": float(intensity)
             }
             data["frame_info"].append(frame_info)
 
@@ -227,7 +229,7 @@ def update_stats(data_to_update, desired_attribute: str):
     return data_to_update
 
 
-def writeImagePyramid(destPath, name, seqNumber, image):
+def writeImagePyramid(destPath, name, seqNumber, image, border_color):
     global seq_num_global
     fullPath = os.path.join(destPath, "full", name + "-" + str(seqNumber).zfill(4) + ".png")
     fullSeqPath = os.path.join(destPath, "fullseq", name + "-" + str(seq_num_global).zfill(4) + ".png")
@@ -242,8 +244,10 @@ def writeImagePyramid(destPath, name, seqNumber, image):
     # eImage = scale(image, 0.125, 0.125)
     # sImage = scale(image, 0.0625, 0.0625)
 
-    cv2.imwrite(fullPath, image)
-    cv2.imwrite(fullSeqPath, image)
+    # TRY: 2020-10-01
+    bordered_image = cv2.copyMakeBorder(image, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=border_color)
+    cv2.imwrite(fullPath, bordered_image)
+    cv2.imwrite(fullSeqPath, bordered_image)
     # cv2.imwrite(halfPath, hImage)
     # cv2.imwrite(quarterPath, qImage)
     # cv2.imwrite(eighthPath, eImage)
@@ -256,6 +260,7 @@ def writeImagePyramid(destPath, name, seqNumber, image):
 # number of pixels that changed from the previous frame are more than 1.85 standard deviations
 # times from the mean number of changed pixels across all interframe changes.
 #
+# TODO: misses FIRST frame!!!
 def detectScenes(sourcePath, destPath, data, name, verbose=False):
     destDir = os.path.join(destPath, "images")
 
@@ -267,25 +272,31 @@ def detectScenes(sourcePath, destPath, data, name, verbose=False):
 
     cap = cv2.VideoCapture(sourcePath)
     for index, fi in enumerate(data["frame_info"]):
-        if fi["brightness"] > bright_threshold:
-            continue
-        if fi["darkness"] > dark_threshold:
-            continue
-        if fi["blurriness"] > blur_threshold:
-            continue
-        if fi["diff_count"] < diff_threshold:
-            continue
-
         cap.set(cv2.CAP_PROP_POS_FRAMES, fi["frame_number"])
         ret, frame = cap.read()
 
+    # TODO: refactor so all frames are extracted, but selected frames are outlined...
+        if fi["brightness"] > bright_threshold:
+            writeImagePyramid(destDir, name, fi["frame_number"], frame, border_color=[255, 255, 255])
+            continue
+        if fi["darkness"] > dark_threshold:
+            writeImagePyramid(destDir, name, fi["frame_number"], frame, border_color=[0, 0, 0, ])
+            continue
+        if fi["blurriness"] > blur_threshold:
+            writeImagePyramid(destDir, name, fi["frame_number"], frame, border_color=[255, 0, 0])
+            continue
+        if fi["diff_count"] < diff_threshold:
+            writeImagePyramid(destDir, name, fi["frame_number"], frame, border_color=[0, 0, 255])
+            continue
+
         # extract dominant color
+        # TODO: what is this for??
         small = resize(frame, 100, 100)
         cols = extract_cols(small, 5)
         data["frame_info"][index]["dominant_cols"] = cols
 
         if frame is not None:
-            writeImagePyramid(destDir, name, fi["frame_number"], frame)
+            writeImagePyramid(destDir, name, fi["frame_number"], frame, border_color=[0, 255, 0])
 
             if verbose:
                 cv2.imshow('extract', frame)
