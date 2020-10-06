@@ -51,7 +51,7 @@ def resize(img, width, height):
 
 #
 # Extract [numCols] domninant colors from an image
-# Uses KMeans on the pixels and then returns the centriods
+# Uses KMeans on the pixels and then returns the centroids
 # of the colors
 #
 def extract_cols(image, numCols):
@@ -110,9 +110,12 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
 
     # TODO: faster, better ways of removing frames...
 
-    blur_detector = BlurDetection(threshold=14, blur_detection_method="variance_of_laplacian")
+    blur_detector = BlurDetection(threshold=14, blur_detection_method="singular_value_decomposition")
     brightness_estimator = EstimateBrightness(white_threshold=220, empty_pixels_allowed=0)
     darkness_estimator = EstimateDarkness(black_threshold=150, dark_pixels_allowed=0)
+
+    # DEBUG: 2020-10-06
+    gray_shape = None
 
     lastFrame = None
     while (cap.isOpened()):
@@ -122,15 +125,25 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
 
         frame_number = cap.get(cv2.CAP_PROP_POS_FRAMES) - 1
 
+        # DEBUG: 2020-20-06 new blurriness method
+        # if frame_number not in [17, 18, 19, 20, 21]:
+        #     continue
+
         # Convert to grayscale
         gray = BlurDetection.to_gray(frame)
+
+        # TRY: Scale down here
+        gray = scale(gray, 0.25, 0.25)
+        if gray_shape != gray.shape:
+            gray_shape = gray.shape
+            print(f"Frame number:{frame_number}; 'early scaling' to: {gray.shape}")
 
         # estimate blurriness
         blurriness = blur_detector.measure_of_focus(gray)
 
         # estimate brightness
-        brightness = brightness_estimator.measure_of_brightness(gray)
-        darkness = darkness_estimator.measure_of_darkness(gray)
+        # brightness = brightness_estimator.measure_of_brightness(gray)
+        # darkness = darkness_estimator.measure_of_darkness(gray)
 
         # estimate average intensity
         cols, rows = gray.shape
@@ -138,32 +151,48 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
         intensity = np.sum(gray) / (255 * num_pixels)
 
         # Scale down and blur to make image differences more robust to noise
-        gray = scale(gray, 0.25, 0.25)
+        # TRY blur HERE to make image differences more robust to noise
+        # gray = scale(gray, 0.25, 0.25)
         gray = cv2.GaussianBlur(gray, (9, 9), 0.0)
 
         if frame_number < after_frame:
             lastFrame = gray
             continue
-
+        sum_all_pixels_lastFrame = np.sum(lastFrame)
         if lastFrame is not None:
-            # simple subtraction keeps identical frames, but with less light (i.e. same, but darker)
-            # TODO: this belongs refactored into the metadata, then acted upon in DetectScenes...
-            lastFrame_intensity = np.sum(lastFrame) / (255 * num_pixels)
-            gray_intensity = np.sum(gray) / (255 * num_pixels)
-            adjusted_lastFrame = cv2.convertScaleAbs(lastFrame, alpha=(gray_intensity / lastFrame_intensity), beta=0)
-
-            diff = cv2.subtract(gray, adjusted_lastFrame)
-
-            diffMag = cv2.countNonZero(diff)
-
-            frame_info = {
-                "frame_number": int(frame_number),
-                "diff_count": int(diffMag),
-                "blurriness": float(blurriness),
-                "brightness": float(brightness),
-                "darkness": float(darkness),
-                "intensity": float(intensity)
-            }
+            if sum_all_pixels_lastFrame > 0:
+                # simple subtraction keeps identical frames, but with less light (i.e. same, but darker)
+                # TODO: this belongs refactored into the metadata, then acted upon in DetectScenes...
+                lastFrame_intensity = sum_all_pixels_lastFrame / (255 * num_pixels)
+                gray_intensity = np.sum(gray) / (255 * num_pixels)
+                # TODO: lastFrame has an intensity of zero, perhaps lastFrame is Not None?
+                # https://stackoverflow.com/questions/15933741/how-do-i-catch-a-numpy-warning-like-its-an-exception-not-just-for-testing
+                with np.errstate(divide='raise'):
+                    try:
+                        adjusted_lastFrame = cv2.convertScaleAbs(lastFrame, alpha=(gray_intensity / lastFrame_intensity), beta=0)
+                    except BaseException as rtw:
+                        print(f"Frame-number: {frame_number} (out of {cap.get(cv2.CAP_PROP_FRAME_COUNT)} frames) "
+                              f"has caused divided-by-zero warning with- gray_intensity: {gray_intensity} "
+                              f"and lastFrame_intensity: {lastFrame_intensity}. {rtw.__str__()}")
+                diff = cv2.subtract(gray, adjusted_lastFrame)
+                diffMag = cv2.countNonZero(diff)
+                frame_info = {
+                    "frame_number": int(frame_number),
+                    "diff_count": int(diffMag),
+                    "blurriness": float(blurriness),
+                    # "brightness": float(brightness),
+                    # "darkness": float(darkness),
+                    "intensity": float(intensity)
+                }
+            else:   # we've reached the end...
+                frame_info = {
+                    "frame_number": int(frame_number),
+                    "diff_count": -1,
+                    "blurriness": float(blurriness),
+                    # "brightness": float(brightness),
+                    # "darkness": float(darkness),
+                    "intensity": float(intensity)
+                }
             data["frame_info"].append(frame_info)
 
             if verbose:
@@ -180,8 +209,9 @@ def calculateFrameStats(sourcePath, verbose=False, after_frame=0):
     # compute some stats
     update_stats(data, "diff_count")
     update_stats(data, "blurriness")
-    update_stats(data, "brightness")
-    update_stats(data, "darkness")
+    # update_stats(data, "brightness")
+    # update_stats(data, "darkness")
+    update_stats(data, "intensity")
 
     return data
 
@@ -244,10 +274,15 @@ def writeImagePyramid(destPath, name, seqNumber, image, border_color):
     # eImage = scale(image, 0.125, 0.125)
     # sImage = scale(image, 0.0625, 0.0625)
 
-    # TRY: 2020-10-01
+    # TRY: 2020-10-01 add a border to every frame
+    # but only "save" green-bordered frames
+    if border_color == [0, 255, 0]:
+        cv2.imwrite(fullPath, image)
+
     bordered_image = cv2.copyMakeBorder(image, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=border_color)
-    cv2.imwrite(fullPath, bordered_image)
     cv2.imwrite(fullSeqPath, bordered_image)
+
+
     # cv2.imwrite(halfPath, hImage)
     # cv2.imwrite(quarterPath, qImage)
     # cv2.imwrite(eighthPath, eImage)
@@ -266,9 +301,10 @@ def detectScenes(sourcePath, destPath, data, name, verbose=False):
 
     # TODO make sd multiplier externally configurable
     diff_threshold = (data["stats"]["diff_count"]["sd"] * 1.0) + data["stats"]["diff_count"]["mean"]
-    blur_threshold = (data["stats"]["blurriness"]["sd"] * 2.0) + data["stats"]["blurriness"]["mean"]
-    bright_threshold = (data["stats"]["brightness"]["sd"] * 1.0) + data["stats"]["brightness"]["mean"]
-    dark_threshold = (data["stats"]["darkness"]["sd"] * 1.0) + data["stats"]["darkness"]["mean"]
+    blur_threshold = 0.8
+    # blur_threshold = (data["stats"]["blurriness"]["sd"] * 2.0) + data["stats"]["blurriness"]["mean"]
+    # bright_threshold = (data["stats"]["brightness"]["sd"] * 1.0) + data["stats"]["brightness"]["mean"]
+    # dark_threshold = (data["stats"]["darkness"]["sd"] * 1.0) + data["stats"]["darkness"]["mean"]
 
     cap = cv2.VideoCapture(sourcePath)
     for index, fi in enumerate(data["frame_info"]):
@@ -276,16 +312,26 @@ def detectScenes(sourcePath, destPath, data, name, verbose=False):
         ret, frame = cap.read()
 
     # TODO: refactor so all frames are extracted, but selected frames are outlined...
-        if fi["brightness"] > bright_threshold:
+
+    # TRY: 2020-10-05 use intensity rather than measures of "empty pixels
+
+    #     if fi["brightness"] > bright_threshold:
+    #         writeImagePyramid(destDir, name, fi["frame_number"], frame, border_color=[255, 255, 255])
+    #         continue
+        if fi["intensity"] > 0.9:
             writeImagePyramid(destDir, name, fi["frame_number"], frame, border_color=[255, 255, 255])
             continue
-        if fi["darkness"] > dark_threshold:
+        # if fi["darkness"] > dark_threshold:
+        #     writeImagePyramid(destDir, name, fi["frame_number"], frame, border_color=[0, 0, 0, ])
+        #     continue
+        if fi["intensity"] < 0.1:
             writeImagePyramid(destDir, name, fi["frame_number"], frame, border_color=[0, 0, 0, ])
             continue
         if fi["blurriness"] > blur_threshold:
             writeImagePyramid(destDir, name, fi["frame_number"], frame, border_color=[255, 0, 0])
             continue
-        if fi["diff_count"] < diff_threshold:
+        # if fi["diff_count"] < diff_threshold:
+        if fi["diff_count"] < 10000:
             writeImagePyramid(destDir, name, fi["frame_number"], frame, border_color=[0, 0, 255])
             continue
 
